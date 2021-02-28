@@ -1,8 +1,3 @@
-using System;
-using System.IO;
-using System.Text;
-using System.Threading.Tasks;
-using System.Security.Cryptography;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Documents;
 using Microsoft.Azure.Documents.Client;
@@ -12,6 +7,12 @@ using Microsoft.Azure.Storage.Blob;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
+using System;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Threading.Tasks;
+using System.Security.Cryptography;
 
 namespace mchua.dev.galleria
 {
@@ -38,6 +39,11 @@ namespace mchua.dev.galleria
                 {
                     string hash = ComputeHash(stream);
                     stream.Position = 0;
+
+                    if (await ImageExists(hash, cosmosdb))
+                    {
+                        return new OkObjectResult("File already exists");
+                    }
 
                     ImageMetadata metadata = new ImageMetadata()
                     {
@@ -75,6 +81,24 @@ namespace mchua.dev.galleria
             ResourceResponse<Document> response = await cosmosdb.CreateDocumentAsync(uri, jobject);
 
             log.LogInformation($"Inserting metadata into cosmos db took '{response.RequestCharge}' RUs.");
+        }
+
+        private static async Task<bool> ImageExists(string hash, IDocumentClient cosmosdb)
+        {
+            Uri uri = UriFactory.CreateDocumentUri("galleria", "metadata", "metadata");
+            try
+            {
+                await cosmosdb.ReadDocumentAsync(uri.ToString(), new RequestOptions() { PartitionKey = new PartitionKey(hash) });
+                return true;
+            }
+            catch (DocumentClientException ex)
+            {
+                if (ex.StatusCode == HttpStatusCode.NotFound)
+                {
+                    return false;
+                }
+                throw ex;
+            }
         }
 
         private static string ComputeHash(Stream stream)
