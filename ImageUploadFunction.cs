@@ -4,11 +4,14 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Azure.Documents;
+using Microsoft.Azure.Documents.Client;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Azure.Storage.Blob;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json.Linq;
 
 namespace mchua.dev.galleria
 {
@@ -18,6 +21,10 @@ namespace mchua.dev.galleria
         public static async Task<IActionResult> Run(
             [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = null)] HttpRequest req,
             [Blob("images", FileAccess.Write)] CloudBlobContainer container,
+            [CosmosDB(
+                databaseName: "galleria",
+                collectionName: "metadata",
+                ConnectionStringSetting = "CosmosDBConnection")] IDocumentClient cosmosdb,
             ILogger log)
         {
             try
@@ -25,12 +32,23 @@ namespace mchua.dev.galleria
                 IFormCollection form = await req.ReadFormAsync();
                 IFormFile file = req.Form.Files["file"];
 
+                await container.CreateIfNotExistsAsync();
+
                 using (Stream stream = file.OpenReadStream())
                 {
                     string hash = ComputeHash(stream);
                     stream.Position = 0;
 
+                    ImageMetadata metadata = new ImageMetadata()
+                    {
+                        ImageId = hash,
+                        OriginalName = file.FileName,
+                        UploadTimestamp = DateTimeOffset.UtcNow,
+                    };
+                    await InsertMetadata(metadata, cosmosdb, log);
+
                     await UploadOriginalFile(stream, hash, file.FileName, container);
+
                     return new OkObjectResult(file.FileName + " - " + file.Length.ToString() + " - " + hash);
                 }
             }
@@ -43,9 +61,20 @@ namespace mchua.dev.galleria
 
         private static async Task UploadOriginalFile(Stream stream, string hash, string filename, CloudBlobContainer container)
         {
-            await container.CreateIfNotExistsAsync();
             CloudBlockBlob blob = container.GetBlockBlobReference($"{hash}/{filename}");
             await blob.UploadFromStreamAsync(stream);
+        }
+
+        private static async Task InsertMetadata(ImageMetadata metadata, IDocumentClient cosmosdb, ILogger log)
+        {
+            JObject jobject = JObject.FromObject(metadata);
+
+            log.LogInformation($"Inserting metadata for image '{metadata.ImageId}' into cosmos db.");
+
+            Uri uri = UriFactory.CreateDocumentCollectionUri("galleria", "metadata");
+            ResourceResponse<Document> response = await cosmosdb.CreateDocumentAsync(uri, jobject);
+
+            log.LogInformation($"Inserting metadata into cosmos db took '{response.RequestCharge}' RUs.");
         }
 
         private static string ComputeHash(Stream stream)
